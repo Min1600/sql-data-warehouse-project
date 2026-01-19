@@ -1,0 +1,213 @@
+/*
+==============================================================================================================================
+Quality Checks
+==============================================================================================================================
+Script Purpose:
+  This script performs various quality checks for data consistency, accuracy, and standardization across the 'silver' schemas. It includes checks for:
+  - Null or duplicate primary keys.
+  - Unwanted spaces in string fields.
+  - Data standardization and consistency.
+  - Invalid date ranges and orders.
+  - Data consistency between related fields.
+
+Usage Notes:
+  - Run these checks after data loading Silver layer
+  - Investigate and resolve any discrepancies found during the checks.
+==============================================================================================================================
+*/
+==============================================================================================================================
+-- Checking 'silver.crm_cust_info'
+==============================================================================================================================
+-- Check for duplicates and NULL values
+-- Expectation no results
+
+SELECT
+COUNT(*) total_rows,
+cst_id
+FROM silver.crm_cust_info
+GROUP BY cst_id
+HAVING COUNT(*) > 1
+
+-- Check for unwanted Spaces
+-- Expectation no results
+SELECT 
+cst_firstname
+FROM silver.crm_cust_info
+WHERE cst_firstname != TRIM(cst_firstname)
+
+-- Data Standardization & Consistency
+-- Expectation only 'Male', 'Female' and 'Unknown'
+
+SELECT DISTINCT cst_gndr
+FROM silver.crm_cust_info
+
+-- Expectation only 'Single', 'Married' and 'Unknown'
+SELECT DISTINCT cst_marital_status
+FROM silver.crm_cust_info
+
+==============================================================================================================================
+-- Checking 'silver.crm_prd_info'
+==============================================================================================================================
+
+-- Check for duplicates and NULL values
+-- Expectation no results
+SELECT
+COUNT(*) total_rows,
+prd_id
+FROM silver.crm_prd_info
+GROUP BY prd_id
+HAVING COUNT(*) > 1 OR prd_id IS NULL
+
+-- Check for unwated Spaces
+-- Expectation no results
+
+SELECT 
+prd_nm
+FROM silver.crm_prd_info
+WHERE prd_nm != TRIM(prd_nm)
+
+-- Check for NULLs or Negative Numbers
+-- Expectation no results
+
+SELECT prd_cost
+FROM silver.crm_prd_info
+WHERE prd_cost < 0 or prd_cost IS NULL 
+
+-- Data Standardization & Consistency
+-- Expectation only 'Mountain', 'other Sales', 'Road', 'Turing' and 'Unknown'
+SELECT DISTINCT prd_line
+FROM silver.crm_prd_info
+
+-- Check for Invalid Date Orders
+-- Expectation no results
+
+SELECT *
+FROM silver.crm_prd_info
+WHERE prd_end_dt < prd_start_dt 
+
+-- script to change dates that are wrong
+SELECT
+prd_id,
+prd_key,
+prd_nm,
+prd_start_dt,
+prd_end_dt,
+-- Make the end date equal to the next value's start date
+CAST(DATEADD(DAY, -1, LEAD(prd_start_dt) OVER(PARTITION BY prd_key ORDER BY prd_start_dt))AS DATE) AS prd_end_dt
+FROM bronze.crm_prd_info
+
+==============================================================================================================================
+-- Checking 'silver.crm_sales_details'
+==============================================================================================================================
+-- Check for Invalid Dates
+-- Expectation no results
+
+SELECT
+NULLIF(sls_order_dt,0) sls_order_dt
+FROM silver.crm_sales_details
+WHERE  
+LEN(sls_order_dt) != 8 -- the dates are 8 characters long YYYYMMDD
+OR sls_order_dt > 20500101 -- no orders after 2050
+OR sls_order_dt < 19000101 -- no orders before 1900 can be any date depending on circumstance
+
+-- Check for Invalide Date Orders
+-- Expectation no results
+
+SELECT
+*
+FROM silver.crm_sales_details
+WHERE sls_order_dt > sls_due_dt OR sls_order_dt > sls_order_dt
+
+-- Check Data Consistency: Between Sales, Quantity, and Price
+-- >> Sales = Quantity * Price
+-- >> Values must not be NULL, zero, or negative.
+
+-- Rules depending on context, and expert advice
+--  >> If Sales is negatice, zero, or null derive it using Quantity and Price
+--  >> If Price is zero or null, calculate it using Sales and Quantity
+--  >> If Price is negative, convert it to a positive value
+
+-- Script that transforms the data to follow the rules above
+
+SELECT
+sls_sales,
+sls_quantity,
+sls_price,
+
+CASE 
+	WHEN sls_sales IS NULL OR sls_sales <=0 OR sls_sales!= sls_quantity * ABS(sls_price)
+		THEN sls_quantity * ABS(sls_price)
+	ELSE sls_sales
+END AS new_sls_sales,
+CASE
+	WHEN sls_price IS NULL OR sls_price <= 0 
+		THEN sls_sales/NULLIF(sls_quantity,0)
+	ELSE sls_price
+END AS new_sls_price
+FROM bronze.crm_sales_details
+WHERE sls_sales != sls_quantity * sls_price
+OR sls_sales IS NULL OR sls_quantity IS NULL OR sls_price IS NULL
+OR sls_sales <=0 OR sls_quantity <=0 OR sls_price <= 0
+
+==============================================================================================================================
+-- Checking 'silver.erp_cust_az12c
+==============================================================================================================================
+-- Identify Out-of-Range Dates
+-- Expectation no results (unless bdate is null)
+
+SELECT
+*
+FROM(
+SELECT DISTINCT
+bdate,
+CASE 
+	WHEN bdate > GETDATE() THEN NULL
+	ELSE bdate
+END AS bdate_new
+FROM silver.erp_cust_az12) t
+WHERE bdate_new IS NULL
+
+
+-- Data Standardization & Consistency
+-- Expectation only 'Male', 'Female' and 'Unknown'
+
+SELECT DISTINCT new_gen
+FROM
+(
+SELECT
+CASE
+	WHEN UPPER(TRIM(gen)) IN ('F','FEMALE') THEN 'Female'
+	WHEN UPPER(TRIM(gen)) IN ('M', 'MALE') THEN 'Male'
+	ELSE 'Unknown'
+END new_gen
+FROM silver.erp_cust_az12
+) t
+
+==============================================================================================================================
+-- Checking 'silver.erp_loc_a101
+==============================================================================================================================
+
+-- Data Standardization & Consistency
+-- Expectation only 'Germany', 'United States', 'Australia', 'United Kingdom', 'Canada', 'France'  and 'Unknown'
+
+SELECT DISTINCT 
+cntry
+FROM(
+SELECT
+CASE
+	WHEN TRIM(cntry) = 'DE' THEN 'Germany'
+	WHEN TRIM(cntry) IN ('US', 'USA') THEN 'United States'
+	WHEN TRIM(cntry) = '' OR cntry IS NULL THEN 'Unknown'
+	ELSE TRIM(cntry)
+END AS cntry
+FROM silver.erp_loc_a101) t
+
+==============================================================================================================================
+-- Checking 'silver.erp_loc_a101
+==============================================================================================================================
+-- Check for unwated Space
+-- Expectation no results 
+
+SELECT * FROM silver.erp_px_cat_g1v2
+WHERE cat != TRIM(cat) OR subcat != TRIM(subcat) OR maintenance != TRIM(maintenance)
+
